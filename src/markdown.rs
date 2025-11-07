@@ -133,11 +133,7 @@ pub async fn convert_to_html(file_path: &PathBuf) -> Result<String, String> {
         .map_err(|e| format!("Failed to write reload.html: {}", e))?;
 
     // コマンドをログ出力
-    eprintln!(
-        "[unidoc] Running: unidoc -s -H {} {}",
-        temp_html.display(),
-        file_path.display()
-    );
+    eprintln!("[unidoc] Running: unidoc for {}", file_path.display());
 
     let output = Command::new("unidoc")
         .arg("-s")

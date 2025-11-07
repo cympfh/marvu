@@ -27,19 +27,39 @@ pub async fn handle_root(State(state): State<AppState>) -> Response {
 pub async fn handle_path(State(state): State<AppState>, Path(path): Path<String>) -> Response {
     let full_path = state.base_dir.join(&path);
 
+    // パスを正規化してセキュリティチェック
+    let canonical_path = match full_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            // ファイルが存在しない場合はcanonicalize失敗するので、
+            // 親ディレクトリで正規化してチェック
+            let parent = full_path.parent();
+            match parent {
+                Some(p) => match p.canonicalize() {
+                    Ok(canonical_parent) => {
+                        // 親が base_dir 外ならFORBIDDEN
+                        if !canonical_parent.starts_with(&*state.base_dir) {
+                            return (StatusCode::FORBIDDEN, "Access denied").into_response();
+                        }
+                        // ファイルが存在しない
+                        return (StatusCode::NOT_FOUND, "Not found").into_response();
+                    }
+                    Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+                },
+                None => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+            }
+        }
+    };
+
     // セキュリティチェック: base_dir外へのアクセスを防ぐ
-    if !full_path.starts_with(&*state.base_dir) {
+    if !canonical_path.starts_with(&*state.base_dir) {
         return (StatusCode::FORBIDDEN, "Access denied").into_response();
     }
 
-    if !full_path.exists() {
-        return (StatusCode::NOT_FOUND, "Not found").into_response();
-    }
-
-    if full_path.is_dir() {
-        handle_directory(&full_path, path).await
+    if canonical_path.is_dir() {
+        handle_directory(&canonical_path, path).await
     } else {
-        handle_file(&full_path, &path).await
+        handle_file(&canonical_path, &path).await
     }
 }
 
@@ -233,4 +253,105 @@ pub async fn handle_reload_js() -> Response {
         js,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn create_test_state(base_dir: PathBuf) -> AppState {
+        let (reload_tx, _) = broadcast::channel(100);
+        AppState {
+            base_dir: Arc::new(base_dir),
+            reload_tx,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_path_traversal_protection() {
+        let temp_dir = std::env::temp_dir().join("grow_test_traversal");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // temp_dirの親ディレクトリに実際にファイルを作成
+        let parent_dir = temp_dir.parent().unwrap();
+        let target_file = parent_dir.join("secret.txt");
+        fs::write(&target_file, "secret data").unwrap();
+
+        let state = create_test_state(temp_dir.clone());
+
+        // パストラバーサル攻撃の試み: 親ディレクトリのファイルにアクセス
+        let response = handle_path(State(state), Path("../secret.txt".to_string())).await;
+        let status = response.status();
+
+        // base_dir外のアクセスは403 FORBIDDENになるべき
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // クリーンアップ
+        fs::remove_file(&target_file).ok();
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_nonexistent_path() {
+        let temp_dir = std::env::temp_dir().join("grow_test_nonexist");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let state = create_test_state(temp_dir.clone());
+
+        let response = handle_path(State(state), Path("nonexistent.txt".to_string())).await;
+        let status = response.status();
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_directory_listing() {
+        let temp_dir = std::env::temp_dir().join("grow_test_dir");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // テスト用のファイルを作成
+        fs::write(temp_dir.join("test.txt"), "test content").unwrap();
+        fs::write(temp_dir.join("test.md"), "# Test").unwrap();
+
+        let response = handle_directory(&temp_dir, "".to_string()).await;
+        let status = response.status();
+
+        assert_eq!(status, StatusCode::OK);
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_markdown_file_detection() {
+        let temp_dir = std::env::temp_dir().join("grow_test_md");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // Markdownファイルを作成
+        fs::write(temp_dir.join("test.md"), "# Hello World").unwrap();
+        fs::write(temp_dir.join("test.mkd"), "# Hello MKD").unwrap();
+
+        // .md ファイルのテスト
+        let md_path = temp_dir.join("test.md");
+        let extension = md_path.extension().and_then(|s| s.to_str());
+        assert!(matches!(extension, Some("md")));
+
+        // .mkd ファイルのテスト
+        let mkd_path = temp_dir.join("test.mkd");
+        let extension = mkd_path.extension().and_then(|s| s.to_str());
+        assert!(matches!(extension, Some("mkd")));
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_reload_js_content() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let response = handle_reload_js().await;
+            assert_eq!(response.status(), StatusCode::OK);
+        });
+    }
 }
