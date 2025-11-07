@@ -126,6 +126,7 @@ a:hover {
 }
 .dir { color: #667eea; }
 .file { color: #9ca3af; }
+a.markdown { font-weight: 600; }
 a:hover .icon { transform: scale(1.2); transition: transform 0.2s; }
 .parent {
     font-weight: 600;
@@ -173,10 +174,19 @@ a:hover .icon { transform: scale(1.2); transition: transform 0.2s; }
         } else {
             format!("{}/{}", relative_path, name)
         };
-        let (icon, class) = if is_dir { ("📁", "dir") } else { ("📄", "file") };
+
+        // Markdownファイルには特別なアイコンを使用
+        let (icon, icon_class, link_class) = if is_dir {
+            ("📁", "dir", "")
+        } else if name.ends_with(".md") || name.ends_with(".mkd") {
+            ("📝", "file", " markdown")
+        } else {
+            ("📄", "file", "")
+        };
+
         html.push_str(&format!(
-            "<li><a href=\"/{}\"><span class=\"icon {}\">{}</span>{}</a></li>",
-            link_path, class, icon, name
+            "<li><a href=\"/{}\" class=\"{}\"><span class=\"icon {}\">{}</span>{}</a></li>",
+            link_path, link_class.trim(), icon_class, icon, name
         ));
     }
 
