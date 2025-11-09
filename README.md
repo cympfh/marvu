@@ -1,6 +1,6 @@
 # 🚀 marvu (mvu)
 
-**marvu** = **mar**kdown **v**iew**u** — A modern, fast markdown viewer server built with Rust and Axum.
+**marvu** = **mar**kdown **view**er — A modern, fast markdown viewer server built with Rust and Axum.
 
 Transform your directory into a beautiful web-based documentation browser with live-reload capabilities. Simply run `mvu` in any directory containing Markdown files, and instantly view them in your browser with a sleek, modern interface.
 
