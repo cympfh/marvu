@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{Html, IntoResponse, Response, Sse},
     response::sse::{Event, KeepAlive},
 };
@@ -598,9 +598,41 @@ async fn handle_file(file_path: &PathBuf, relative_path: &str, base_dir: &PathBu
     } else {
         // その他のファイルはそのまま返す
         match tokio::fs::read(file_path).await {
-            Ok(contents) => contents.into_response(),
+            Ok(contents) => {
+                let content_type = guess_content_type(extension);
+                ([(header::CONTENT_TYPE, content_type)], contents).into_response()
+            }
             Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Cannot read file").into_response(),
         }
+    }
+}
+
+fn guess_content_type(extension: Option<&str>) -> &'static str {
+    match extension {
+        Some("html") | Some("htm") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "application/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("xml") => "application/xml; charset=utf-8",
+        Some("txt") => "text/plain; charset=utf-8",
+        Some("pdf") => "application/pdf",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("webp") => "image/webp",
+        Some("ico") => "image/x-icon",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
+        Some("mp3") => "audio/mpeg",
+        Some("mp4") => "video/mp4",
+        Some("webm") => "video/webm",
+        Some("zip") => "application/zip",
+        Some("tar") => "application/x-tar",
+        Some("gz") => "application/gzip",
+        _ => "application/octet-stream",
     }
 }
 
