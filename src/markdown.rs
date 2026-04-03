@@ -459,6 +459,10 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+pub fn generate_file_tree_html(base_dir: &PathBuf, current_path: &str) -> Result<String, String> {
+    generate_file_tree(base_dir, current_path)
+}
+
 fn generate_file_tree(base_dir: &PathBuf, current_path: &str) -> Result<String, String> {
     fn build_tree(dir: &PathBuf, prefix: &str, current: &str, depth: usize) -> Result<String, String> {
         if depth > 3 {

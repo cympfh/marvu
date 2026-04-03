@@ -14,6 +14,11 @@ Transform your directory into a beautiful web-based documentation browser with l
   - **Keyboard Navigation**: Use arrow keys (←/→) to browse through images
   - **Quick Access**: Direct link to original image file in the modal
   - **Format Support**: JPG, PNG, GIF, WebP, SVG (case-insensitive)
+- **📦 ZIP File Support**: Browse and view contents inside ZIP archives
+  - **Directory Navigation**: Explore ZIP file structure like regular directories
+  - **Markdown Preview**: View markdown files inside ZIP archives
+  - **Image Gallery**: View images inside ZIP files with thumbnail and modal support
+  - **Seamless Integration**: ZIP contents use the same beautiful UI as regular files
 - **🔄 Live Reload**: Automatic browser refresh when files change
 - **🎨 Modern Design**: Sleek gradient backgrounds with glassmorphism effects
 - **📱 Responsive**: Looks great on desktop and mobile devices
@@ -100,6 +105,19 @@ Markdown files include enhanced navigation features:
 2. **File Tree**: Click the 📁 icon to browse all files in the directory
 3. **Smooth Scrolling**: Click any TOC item to jump to that section
 
+### Browsing ZIP Archives
+
+ZIP files are displayed with a 📦 icon and can be browsed like regular directories:
+
+1. **Click on a ZIP file** to enter and view its contents
+2. **Navigate directories** inside the ZIP just like regular folders
+3. **View markdown files** inside ZIP archives with full formatting and styling
+4. **Browse images** inside ZIP files with thumbnail display and modal viewer
+5. **Use arrow keys** (←/→) to navigate between images in the ZIP archive
+6. **URL format**: ZIP contents use the format `/path/to/archive.zip::internal/path`
+
+Perfect for viewing manga, documentation archives, or any compressed content!
+
 ## 🏗️ Architecture
 
 marvu is built with a clean, modular architecture:
@@ -109,5 +127,6 @@ marvu is built with a clean, modular architecture:
 - **Server-Sent Events**: Live reload functionality
 - **External Processing**: Uses `unidoc` for markdown conversion
 - **Image Handling**: Native image serving with lazy loading and modal viewer
+- **ZIP Archive Support**: Built-in ZIP file browsing with the `zip` crate
 - **Concurrent Design**: File watching runs in separate threads
 - **Modern Frontend**: Pure JavaScript with no external dependencies for the image gallery

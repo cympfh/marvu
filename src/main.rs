@@ -3,6 +3,7 @@ mod handler;
 mod markdown;
 mod server;
 mod watcher;
+mod zip_handler;
 
 use clap::Parser;
 use std::sync::Arc;

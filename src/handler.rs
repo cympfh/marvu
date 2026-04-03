@@ -1,9 +1,10 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Response, Sse},
     response::sse::{Event, KeepAlive},
 };
+use std::collections::HashMap;
 use futures::stream::Stream;
 use std::convert::Infallible;
 use std::path::PathBuf;
@@ -13,6 +14,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 use crate::markdown;
+use crate::zip_handler;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,7 +26,32 @@ pub async fn handle_root(State(state): State<AppState>) -> Response {
     handle_directory(&state.base_dir, "".to_string()).await
 }
 
-pub async fn handle_path(State(state): State<AppState>, Path(path): Path<String>) -> Response {
+pub async fn handle_path(State(state): State<AppState>, Path(path): Path<String>, Query(params): Query<HashMap<String, String>>) -> Response {
+    let raw = params.get("raw").map(|v| v == "1").unwrap_or(false);
+    // zipファイル内のパスをチェック (形式: path/to/file.zip::内部パス)
+    if let Some(zip_separator_pos) = path.find("::") {
+        let zip_path = &path[..zip_separator_pos];
+        let internal_path = &path[zip_separator_pos + 2..];
+
+        let full_zip_path = state.base_dir.join(zip_path);
+
+        // セキュリティチェック
+        let canonical_zip_path = match full_zip_path.canonicalize() {
+            Ok(p) => p,
+            Err(_) => return handle_not_found(&path).await,
+        };
+
+        if !canonical_zip_path.starts_with(&*state.base_dir) {
+            return (StatusCode::FORBIDDEN, "Access denied").into_response();
+        }
+
+        if !zip_handler::is_zip_file(&canonical_zip_path) {
+            return (StatusCode::BAD_REQUEST, "Not a zip file").into_response();
+        }
+
+        return handle_zip_content(&canonical_zip_path, zip_path, internal_path, &state.base_dir).await;
+    }
+
     let full_path = state.base_dir.join(&path);
 
     // パスを正規化してセキュリティチェック
@@ -59,7 +86,7 @@ pub async fn handle_path(State(state): State<AppState>, Path(path): Path<String>
     if canonical_path.is_dir() {
         handle_directory(&canonical_path, path).await
     } else {
-        handle_file(&canonical_path, &path, &state.base_dir).await
+        handle_file(&canonical_path, &path, &state.base_dir, raw).await
     }
 }
 
@@ -449,15 +476,26 @@ a:hover .icon { transform: scale(1.2); transition: transform 0.2s; }
             image_paths.push(link_path.clone());
         }
 
+        // zipファイルの判定
+        let is_zip = !is_dir && (name.ends_with(".zip") || name.ends_with(".ZIP"));
+
+        // HTMLファイルの判定
+        let is_html = !is_dir && (name.ends_with(".html") || name.ends_with(".htm") ||
+            name.ends_with(".HTML") || name.ends_with(".HTM"));
+
         // Markdownファイルには特別なアイコンを使用
-        let (icon, icon_class, link_class) = if is_dir {
-            ("📁", "dir", "")
+        let (icon, icon_class, link_class, actual_link) = if is_dir {
+            ("📁", "dir", "", link_path.clone())
         } else if name.ends_with(".md") || name.ends_with(".mkd") {
-            ("📝", "file", " markdown")
+            ("📝", "file", " markdown", link_path.clone())
         } else if is_image {
-            ("🖼️", "file", "")
+            ("🖼️", "file", "", link_path.clone())
+        } else if is_zip {
+            ("📦", "file", " zip", format!("{}::", link_path))
+        } else if is_html {
+            ("🌐", "file", " html-file", link_path.clone())
         } else {
-            ("📄", "file", "")
+            ("📄", "file", "", link_path.clone())
         };
 
         if is_image {
@@ -468,7 +506,7 @@ a:hover .icon { transform: scale(1.2); transition: transform 0.2s; }
         } else {
             html.push_str(&format!(
                 "<li><a href=\"/{}\" class=\"{}\"><span class=\"icon {}\">{}</span>{}</a></li>",
-                link_path, link_class.trim(), icon_class, icon, name
+                actual_link, link_class.trim(), icon_class, icon, name
             ));
         }
     }
@@ -540,7 +578,7 @@ document.addEventListener('keydown', function(e) {
     Html(html).into_response()
 }
 
-async fn handle_file(file_path: &PathBuf, relative_path: &str, base_dir: &PathBuf) -> Response {
+async fn handle_file(file_path: &PathBuf, relative_path: &str, base_dir: &PathBuf, raw: bool) -> Response {
     let extension = file_path.extension().and_then(|s| s.to_str());
 
     // マークダウンファイルの場合はunidocで変換
@@ -553,12 +591,419 @@ async fn handle_file(file_path: &PathBuf, relative_path: &str, base_dir: &PathBu
             )
                 .into_response(),
         }
+    } else if matches!(extension, Some("html") | Some("htm")) && !raw {
+        // HTMLファイルはiframeで包んだラッパーページを返す
+        let html = generate_html_wrapper(relative_path, base_dir);
+        Html(html).into_response()
     } else {
         // その他のファイルはそのまま返す
         match tokio::fs::read(file_path).await {
             Ok(contents) => contents.into_response(),
             Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Cannot read file").into_response(),
         }
+    }
+}
+
+fn generate_html_wrapper(relative_path: &str, base_dir: &PathBuf) -> String {
+    let file_tree = crate::markdown::generate_file_tree_html(base_dir, relative_path)
+        .unwrap_or_else(|_| String::from("<p>ファイルツリーの読み込み失敗</p>"));
+
+    format!(r#"<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{}</title>
+<script src="/__reload__.js"></script>
+<style>
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+html, body {{ height: 100%; }}
+body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+}}
+#side-menu {{
+    width: 280px;
+    min-width: 280px;
+    height: 100vh;
+    background: #f9fafb;
+    box-shadow: 2px 0 10px rgba(0,0,0,0.1);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    z-index: 100;
+}}
+#side-menu-header {{
+    padding: 1rem;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    font-weight: 700;
+    font-size: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}}
+#file-tree {{
+    padding: 0.5rem;
+    flex: 1;
+    overflow-y: auto;
+}}
+#file-tree ul {{
+    list-style: none;
+    padding-left: 0;
+}}
+#file-tree .nested {{
+    padding-left: 1rem;
+}}
+#file-tree li {{
+    margin: 0.15rem 0;
+}}
+#file-tree a {{
+    color: #374151;
+    text-decoration: none;
+    display: block;
+    padding: 0.35rem 0.5rem;
+    border-radius: 6px;
+    transition: all 0.2s;
+    font-size: 0.9rem;
+}}
+#file-tree a:hover {{
+    background: #667eea;
+    color: white;
+}}
+#file-tree .dir {{
+    font-weight: 600;
+    color: #667eea;
+}}
+#file-tree .dir::before {{ content: '📁 '; }}
+#file-tree .file::before {{ content: '📄 '; }}
+#file-tree .markdown {{ font-weight: 600; }}
+#file-tree .markdown::before {{ content: '📝 '; }}
+#file-tree .html-file::before {{ content: '🌐 '; }}
+#main-content {{
+    flex: 1;
+    height: 100vh;
+    overflow: hidden;
+}}
+#html-frame {{
+    width: 100%;
+    height: 100%;
+    border: none;
+}}
+</style>
+</head><body>
+<div id="side-menu">
+    <div id="side-menu-header">📁 ファイル</div>
+    <div id="file-tree">{}</div>
+</div>
+<div id="main-content">
+    <iframe id="html-frame" src="/{}?raw=1"></iframe>
+</div>
+</body></html>"#, relative_path, file_tree, relative_path)
+}
+
+async fn handle_zip_content(zip_path: &PathBuf, zip_relative_path: &str, internal_path: &str, base_dir: &PathBuf) -> Response {
+    // zip内のすべてのエントリを取得
+    let all_entries = match zip_handler::list_zip_contents(zip_path) {
+        Ok(entries) => entries,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read zip: {}", e)).into_response();
+        }
+    };
+
+    // internal_pathが空の場合はzipのルートディレクトリを表示
+    if internal_path.is_empty() || internal_path == "/" {
+        return handle_zip_directory(zip_path, zip_relative_path, "", &all_entries).await;
+    }
+
+    // internal_pathがディレクトリかファイルか判定
+    let is_directory = all_entries.iter().any(|e| {
+        e.name == internal_path && e.is_dir ||
+        e.name.starts_with(&format!("{}/", internal_path))
+    });
+
+    if is_directory {
+        handle_zip_directory(zip_path, zip_relative_path, internal_path, &all_entries).await
+    } else {
+        handle_zip_file(zip_path, zip_relative_path, internal_path, base_dir).await
+    }
+}
+
+async fn handle_zip_directory(_zip_path: &PathBuf, zip_relative_path: &str, internal_dir: &str, all_entries: &[zip_handler::ZipEntry]) -> Response {
+    let entries = zip_handler::get_directory_entries(all_entries, internal_dir);
+
+    let mut html = String::from(r#"<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zip Contents</title>
+<script src="/__reload__.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    min-height: 100vh;
+    padding: 2rem;
+    color: #333;
+}
+.container {
+    max-width: 900px;
+    margin: 0 auto;
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(10px);
+    border-radius: 20px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    padding: 2.5rem;
+    animation: fadeIn 0.5s ease;
+}
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+h1 {
+    font-size: 2rem;
+    font-weight: 700;
+    margin-bottom: 1.5rem;
+    color: #667eea;
+    border-bottom: 3px solid #667eea;
+    padding-bottom: 0.75rem;
+    word-break: break-all;
+}
+.path {
+    font-size: 1rem;
+    color: #666;
+    font-weight: 400;
+}
+ul {
+    list-style: none;
+}
+li {
+    border-bottom: 1px solid #e5e7eb;
+}
+li:last-child {
+    border-bottom: none;
+}
+a {
+    display: flex;
+    align-items: center;
+    padding: 1rem 1.25rem;
+    text-decoration: none;
+    color: #374151;
+    font-size: 1rem;
+    transition: all 0.2s ease;
+    border-radius: 8px;
+}
+a:hover {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    transform: translateX(8px);
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+.icon {
+    margin-right: 1rem;
+    font-size: 1.5rem;
+    min-width: 1.5rem;
+}
+.dir { color: #667eea; }
+.file { color: #9ca3af; }
+a.markdown { font-weight: 600; }
+a:hover .icon { transform: scale(1.2); transition: transform 0.2s; }
+.parent {
+    font-weight: 600;
+    color: #667eea;
+}
+.image-item {
+    position: relative;
+}
+.image-item a {
+    cursor: pointer;
+}
+.thumbnail {
+    width: 80px;
+    height: 80px;
+    object-fit: cover;
+    border-radius: 8px;
+    margin-right: 1rem;
+}
+@media (max-width: 640px) {
+    body { padding: 1rem; }
+    .container { padding: 1.5rem; }
+    h1 { font-size: 1.5rem; }
+    .thumbnail { width: 60px; height: 60px; }
+}
+</style>
+</head><body><div class="container">"#);
+
+    let display_path = if internal_dir.is_empty() {
+        format!("📦 {}", zip_relative_path)
+    } else {
+        format!("📦 {}/{}", zip_relative_path, internal_dir)
+    };
+
+    html.push_str(&format!("<h1><span class=\"path\">{}</span></h1>", display_path));
+    html.push_str("<ul>");
+
+    // 親ディレクトリへのリンク
+    if !internal_dir.is_empty() {
+        let parent = if internal_dir.contains('/') {
+            internal_dir.rsplitn(2, '/').nth(1).unwrap()
+        } else {
+            ""
+        };
+        let parent_link = if parent.is_empty() {
+            format!("/{}::", zip_relative_path)
+        } else {
+            format!("/{}::{}", zip_relative_path, parent)
+        };
+        html.push_str(&format!(
+            "<li><a href=\"{}\" class=\"parent\"><span class=\"icon\">⬆️</span>Parent Directory</a></li>",
+            parent_link
+        ));
+    }
+
+    let mut image_paths = Vec::new();
+
+    for entry in entries {
+        let file_name = entry.name.rsplit('/').next().unwrap_or(&entry.name);
+        let link_path = format!("/{}::{}", zip_relative_path, entry.name);
+
+        // 画像ファイルの判定
+        let is_image = !entry.is_dir && (
+            file_name.ends_with(".jpg") || file_name.ends_with(".jpeg") ||
+            file_name.ends_with(".png") || file_name.ends_with(".gif") ||
+            file_name.ends_with(".webp") || file_name.ends_with(".svg") ||
+            file_name.ends_with(".JPG") || file_name.ends_with(".JPEG") ||
+            file_name.ends_with(".PNG") || file_name.ends_with(".GIF") ||
+            file_name.ends_with(".WEBP") || file_name.ends_with(".SVG")
+        );
+
+        if is_image {
+            image_paths.push(link_path.clone());
+        }
+
+        let is_html_zip = !entry.is_dir && (file_name.ends_with(".html") || file_name.ends_with(".htm") ||
+            file_name.ends_with(".HTML") || file_name.ends_with(".HTM"));
+
+        let (icon, icon_class, link_class) = if entry.is_dir {
+            ("📁", "dir", "")
+        } else if file_name.ends_with(".md") || file_name.ends_with(".mkd") {
+            ("📝", "file", " markdown")
+        } else if is_image {
+            ("🖼️", "file", "")
+        } else if is_html_zip {
+            ("🌐", "file", " html-file")
+        } else {
+            ("📄", "file", "")
+        };
+
+        if is_image {
+            html.push_str(&format!(
+                "<li class=\"image-item\"><a href=\"javascript:void(0)\" onclick=\"openModal('{}', {})\" class=\"{}\"><img src=\"{}\" class=\"thumbnail\" alt=\"{}\" loading=\"lazy\"><span>{}</span></a></li>",
+                link_path, image_paths.len() - 1, link_class.trim(), link_path, file_name, file_name
+            ));
+        } else {
+            html.push_str(&format!(
+                "<li><a href=\"{}\" class=\"{}\"><span class=\"icon {}\">{}</span>{}</a></li>",
+                link_path, link_class.trim(), icon_class, icon, file_name
+            ));
+        }
+    }
+
+    html.push_str("</ul></div>");
+
+    // 画像モーダル追加（画像がある場合のみ）
+    if !image_paths.is_empty() {
+        html.push_str(r#"<div id="imageModal" class="modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.9); z-index: 10000; align-items: center; justify-content: center;">
+    <div class="modal-content" style="position: relative; max-width: 90%; max-height: 90%; display: flex; align-items: center; justify-content: center;">
+        <a id="modalLink" style="position: absolute; top: 20px; right: 80px; background: rgba(0, 0, 0, 0.5); color: white; padding: 0.5rem 1rem; border-radius: 8px; text-decoration: none; font-size: 0.9rem;" href="" target="_blank">元ファイル</a>
+        <div style="position: absolute; top: 20px; right: 20px; color: white; font-size: 2rem; cursor: pointer; background: rgba(0, 0, 0, 0.5); width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center;" onclick="closeModal()">×</div>
+        <div style="position: absolute; top: 50%; transform: translateY(-50%); left: 20px; background: rgba(0, 0, 0, 0.5); color: white; font-size: 2rem; cursor: pointer; width: 50px; height: 50px; border-radius: 50%; display: flex; align-items: center; justify-content: center;" onclick="prevImage()">‹</div>
+        <div style="position: absolute; top: 50%; transform: translateY(-50%); right: 20px; background: rgba(0, 0, 0, 0.5); color: white; font-size: 2rem; cursor: pointer; width: 50px; height: 50px; border-radius: 50%; display: flex; align-items: center; justify-content: center;" onclick="nextImage()">›</div>
+        <img id="modalImage" style="max-width: 100%; max-height: 90vh; object-fit: contain; border-radius: 8px;" src="" alt="">
+    </div>
+</div>
+<script>
+const imagePaths = "#);
+        html.push_str(&serde_json::to_string(&image_paths).unwrap_or_else(|_| "[]".to_string()));
+        html.push_str(r#";
+let currentImageIndex = 0;
+function openModal(imagePath, index) {
+    currentImageIndex = index;
+    updateModalImage();
+    document.getElementById('imageModal').style.display = 'flex';
+}
+function closeModal() {
+    document.getElementById('imageModal').style.display = 'none';
+}
+function updateModalImage() {
+    const imagePath = imagePaths[currentImageIndex];
+    document.getElementById('modalImage').src = imagePath;
+    document.getElementById('modalLink').href = imagePath;
+}
+function nextImage() {
+    currentImageIndex = (currentImageIndex + 1) % imagePaths.length;
+    updateModalImage();
+}
+function prevImage() {
+    currentImageIndex = (currentImageIndex - 1 + imagePaths.length) % imagePaths.length;
+    updateModalImage();
+}
+document.getElementById('imageModal').addEventListener('click', function(e) {
+    if (e.target === this) closeModal();
+});
+document.addEventListener('keydown', function(e) {
+    const modal = document.getElementById('imageModal');
+    if (modal.style.display === 'flex') {
+        if (e.key === 'ArrowLeft') prevImage();
+        else if (e.key === 'ArrowRight') nextImage();
+        else if (e.key === 'Escape') closeModal();
+    }
+});
+</script>"#);
+    }
+
+    html.push_str("</body></html>");
+    Html(html).into_response()
+}
+
+async fn handle_zip_file(zip_path: &PathBuf, zip_relative_path: &str, internal_file: &str, base_dir: &PathBuf) -> Response {
+    // zipからファイルを抽出
+    let contents = match zip_handler::read_file_from_zip(zip_path, internal_file) {
+        Ok(data) => data,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to extract file: {}", e)).into_response();
+        }
+    };
+
+    // ファイル拡張子で処理を分ける
+    let extension = internal_file.rsplit('.').next().and_then(|ext| {
+        if ext.contains('/') { None } else { Some(ext) }
+    });
+
+    // マークダウンファイルの場合
+    if matches!(extension, Some("md") | Some("mkd")) {
+        // 一時ファイルに書き出してunidocで処理
+        let temp_file = std::env::temp_dir().join(format!("mvu_zip_{}.md", internal_file.replace('/', "_")));
+        if let Err(e) = std::fs::write(&temp_file, &contents) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write temp file: {}", e)).into_response();
+        }
+
+        let full_path = format!("{}/{}", zip_relative_path, internal_file);
+        match markdown::convert_to_html(&temp_file, &full_path, base_dir).await {
+            Ok(html) => {
+                std::fs::remove_file(&temp_file).ok();
+                Html(html).into_response()
+            },
+            Err(e) => {
+                std::fs::remove_file(&temp_file).ok();
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("Markdown conversion failed: {}", e)).into_response()
+            }
+        }
+    } else {
+        // その他のファイルはそのまま返す
+        contents.into_response()
     }
 }
 
@@ -607,7 +1052,7 @@ mod tests {
         let state = create_test_state(temp_dir.clone());
 
         // パストラバーサル攻撃の試み: 親ディレクトリのファイルにアクセス
-        let response = handle_path(State(state), Path("../secret.txt".to_string())).await;
+        let response = handle_path(State(state), Path("../secret.txt".to_string()), Query(HashMap::new())).await;
         let status = response.status();
 
         // base_dir外のアクセスは403 FORBIDDENになるべき
@@ -625,7 +1070,7 @@ mod tests {
 
         let state = create_test_state(temp_dir.clone());
 
-        let response = handle_path(State(state), Path("nonexistent.txt".to_string())).await;
+        let response = handle_path(State(state), Path("nonexistent.txt".to_string()), Query(HashMap::new())).await;
         let status = response.status();
 
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -710,5 +1155,39 @@ mod tests {
         assert!(body_str.contains("imageModal"));
 
         fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_zip_file_detection() {
+        let temp_dir = std::env::temp_dir().join("mvu_test_zip");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // zipファイルを作成（空のzipファイル）
+        fs::write(temp_dir.join("test.zip"), &[
+            0x50, 0x4b, 0x05, 0x06, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]).unwrap();
+
+        let response = handle_directory(&temp_dir, "".to_string()).await;
+        let status = response.status();
+        assert_eq!(status, StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+
+        // zipファイルが📦アイコンで表示されることを確認
+        assert!(body_str.contains("test.zip"));
+        assert!(body_str.contains("📦"));
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_zip_handler_is_zip_file() {
+        use std::path::Path;
+        assert!(zip_handler::is_zip_file(Path::new("test.zip")));
+        assert!(zip_handler::is_zip_file(Path::new("test.ZIP")));
+        assert!(!zip_handler::is_zip_file(Path::new("test.txt")));
     }
 }
