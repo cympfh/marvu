@@ -23,7 +23,7 @@ pub async fn start(state: AppState, host: &str, port: u16) -> Result<(), std::io
         .route("/", get(handle_root))
         .route("/__reload__", get(handle_reload_events))
         .route("/__reload__.js", get(handle_reload_js))
-        .route("/*path", get(handle_path))
+        .route("/{*path}", get(handle_path))
         .layer(middleware::from_fn(logging_middleware))
         .with_state(state);
 
