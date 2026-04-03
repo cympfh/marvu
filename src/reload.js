@@ -6,8 +6,8 @@
             location.reload();
         }
     };
-    evtSource.onerror = function() {
-        console.log('SSE connection error, retrying...');
-        setTimeout(() => location.reload(), 1000);
+    evtSource.onerror = function(e) {
+        // EventSourceは自動的に再接続を試みるので、ここでリロードする必要はない
+        console.log('SSE connection error, will auto-retry...', e);
     };
 })();
