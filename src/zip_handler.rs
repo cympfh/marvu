@@ -28,7 +28,9 @@ pub fn list_zip_contents(zip_path: &Path) -> Result<Vec<ZipEntry>, String> {
         let file = archive.by_index(i)
             .map_err(|e| format!("Failed to read zip entry: {}", e))?;
 
-        let name = file.name().to_string();
+        let name = file.name()
+            .map_err(|e| format!("Failed to read zip entry name: {}", e))?
+            .into_owned();
         let is_dir = file.is_dir();
         let size = file.size();
 
