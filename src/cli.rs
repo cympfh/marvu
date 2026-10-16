@@ -16,6 +16,10 @@ pub struct Args {
     /// Directory to serve
     #[arg(default_value = ".")]
     pub directory: PathBuf,
+
+    /// Disable hot-reload on file changes
+    #[arg(long = "no-hot-reload", action = clap::ArgAction::SetTrue)]
+    pub no_hot_reload: bool,
 }
 
 #[cfg(test)]

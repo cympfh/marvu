@@ -20,6 +20,7 @@ use crate::zip_handler;
 pub struct AppState {
     pub base_dir: Arc<PathBuf>,
     pub reload_tx: broadcast::Sender<()>,
+    pub hot_reload: bool,
 }
 
 pub async fn handle_root(State(state): State<AppState>) -> Response {
@@ -1048,8 +1049,12 @@ pub async fn handle_reload_events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-pub async fn handle_reload_js() -> Response {
-    let js = include_str!("reload.js");
+pub async fn handle_reload_js(State(state): State<AppState>) -> Response {
+    let js: &str = if state.hot_reload {
+        include_str!("reload.js")
+    } else {
+        ""
+    };
     (
         StatusCode::OK,
         [("Content-Type", "application/javascript")],
@@ -1068,6 +1073,7 @@ mod tests {
         AppState {
             base_dir: Arc::new(base_dir),
             reload_tx,
+            hot_reload: true,
         }
     }
 
@@ -1151,11 +1157,15 @@ mod tests {
 
     #[test]
     fn test_reload_js_content() {
+        let temp_dir = std::env::temp_dir().join("mvu_test_reload_js");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let state = State(create_test_state(temp_dir.clone()));
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let response = handle_reload_js().await;
+            let response = handle_reload_js(state).await;
             assert_eq!(response.status(), StatusCode::OK);
         });
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[tokio::test]
